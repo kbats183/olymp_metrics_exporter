@@ -1,0 +1,60 @@
+package main
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/yusufpapurcu/wmi"
+	"log"
+	"strings"
+)
+
+type Win32_Printer struct {
+	Name                   string
+	JobCountSinceLastReset uint32
+}
+
+type Win32_PrintJob struct {
+	Name       string
+	TotalPages uint32
+}
+
+// Метрики
+var (
+	printerPages = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "printer_pages_total",
+		Help: "Total number of printed pages since printer reset",
+	}, []string{"printer"})
+
+	printerQueueJobs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "printer_queue_jobs",
+		Help: "Number of jobs currently in printer queue",
+	}, []string{"printer"})
+)
+
+func collectPrinterMetrics() {
+	var printers []Win32_Printer
+	if err := wmi.Query("SELECT Name, JobCountSinceLastReset FROM Win32_Printer", &printers); err != nil {
+		log.Printf("WMI query printers failed: %v", err)
+		return
+	}
+
+	var jobs []Win32_PrintJob
+	if err := wmi.Query("SELECT Name, TotalPages FROM Win32_PrintJob", &jobs); err != nil {
+		log.Printf("WMI query print jobs failed: %v", err)
+	}
+
+	// Считаем активные задания по каждому принтеру
+	jobCount := map[string]int{}
+	for _, job := range jobs {
+		// имя задания имеет формат "PRINTERNAME, Job X"
+		pname := job.Name
+		if comma := strings.Index(pname, ","); comma > 0 {
+			pname = pname[:comma]
+		}
+		jobCount[pname]++
+	}
+
+	for _, p := range printers {
+		printerPages.WithLabelValues(p.Name).Add(float64(p.JobCountSinceLastReset))
+		printerQueueJobs.WithLabelValues(p.Name).Set(float64(jobCount[p.Name]))
+	}
+}
